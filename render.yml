@@ -1,0 +1,14 @@
+services:
+  - type: worker
+    name: arb-scanner
+    runtime: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: python arb_scanner_v2.py
+    plan: free
+    envVars:
+      - key: ODDS_API_KEY
+        sync: false
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: TELEGRAM_CHAT_ID
+        sync: false
