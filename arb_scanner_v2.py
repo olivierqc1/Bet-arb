@@ -1,16 +1,10 @@
 """
 ╔══════════════════════════════════════════════════════╗
-║   ARB SCANNER v5 — Betfair vs Bet365 UNIQUEMENT     ║
-║   Pré-match seulement (temps de miser = heures)     ║
+║   ARB SCANNER v5 — Betfair vs Unibet                ║
+║   Pré-match seulement                               ║
 ║   Sports: NBA + La Liga | Alertes: Telegram          ║
 ║   Commandes: /pause /resume /stats /help             ║
 ╚══════════════════════════════════════════════════════╝
-
-LOGIQUE:
-- On prend les cotes Betfair ET Bet365 pour chaque outcome
-- Pour chaque outcome, on garde la MEILLEURE cote entre les deux
-- Si la somme des meilleures proba < 1.0 → vrai arb
-- Seulement les matchs qui n'ont pas encore commencé (pré-match)
 """
 
 import os
@@ -36,8 +30,12 @@ BANKROLL            = 100
 POLL_INTERVAL       = 600   # 10 min = ~8 640 req/mois → safe $10
 LOG_FILE            = "arb_opportunities.json"
 
-# Les 2 seuls bookmakers qu'on compare
-BOOKS = ["betfair_ex_eu", "bet365"]
+# Les 2 bookmakers comparés
+BOOKS = ["betfair_ex_eu", "unibet_eu"]
+BOOK_LABELS = {
+    "betfair_ex_eu": "BETFAIR",
+    "unibet_eu":     "UNIBET",
+}
 
 # ─────────────────────────────────────────────────────
 # 🏟️  SPORTS
@@ -164,7 +162,7 @@ def send_startup_message():
         f"━━━━━━━━━━━━━━━━━━━━\n"
         f"Mode: <b>{mode}</b>\n"
         f"Sports: {', '.join(SPORTS.values())}\n"
-        f"Bookmakers: <b>Betfair ⭐ vs Bet365 ⭐</b>\n"
+        f"Bookmakers: <b>Betfair ⭐ vs Unibet ⭐</b>\n"
         f"Type: <b>Pré-match uniquement</b>\n"
         f"Min profit: <b>{MIN_PROFIT_PCT}%</b>\n"
         f"Bankroll: <b>${BANKROLL}</b>\n"
@@ -227,17 +225,15 @@ def fetch_odds(sport_key: str) -> list:
 
 
 # ─────────────────────────────────────────────────────
-# 🔍  DÉTECTION D'ARB — BETFAIR vs BET365
+# 🔍  DÉTECTION D'ARB — BETFAIR vs UNIBET
 # ─────────────────────────────────────────────────────
 
 def find_arb_opportunities(game: dict, sport_label: str) -> list:
     """
     Pour chaque outcome (Home, Draw, Away):
-      - On prend la meilleure cote entre Betfair et Bet365
-      - On note quel bookie offre cette meilleure cote
-    Si sum(1/meilleure_cote) < 1.0 → arb ✅
-
-    Pré-match seulement : on ignore les matchs déjà commencés.
+      - Meilleure cote entre Betfair et Unibet
+      - Si sum(1/meilleure_cote) < 1.0 → arb ✅
+    Pré-match uniquement.
     """
     home = game.get("home_team", "Home")
     away = game.get("away_team", "Away")
@@ -248,9 +244,8 @@ def find_arb_opportunities(game: dict, sport_label: str) -> list:
         commence_dt = datetime.fromisoformat(commence_raw.replace("Z", "+00:00"))
         now_utc = datetime.now(timezone.utc)
         if commence_dt <= now_utc:
-            return []  # Match déjà commencé, on skip
+            return []
         commence_str = commence_dt.strftime("%d/%m %H:%M UTC")
-        # Temps restant avant le match
         delta = commence_dt - now_utc
         hours_left = int(delta.total_seconds() // 3600)
         mins_left = int((delta.total_seconds() % 3600) // 60)
@@ -259,8 +254,7 @@ def find_arb_opportunities(game: dict, sport_label: str) -> list:
         commence_str = commence_raw
         time_left = "?"
 
-    # ── Collecter les cotes par bookie ──
-    # bookie_odds = { "betfair_ex_eu": {"Real Madrid": 2.10, "Draw": 3.5, ...}, ... }
+    # ── Cotes par bookie ──
     bookie_odds = {}
     for bookmaker in game.get("bookmakers", []):
         bookie_key = bookmaker["key"]
@@ -273,40 +267,35 @@ def find_arb_opportunities(game: dict, sport_label: str) -> list:
             if odds_map:
                 bookie_odds[bookie_key] = odds_map
 
-    # Besoin des DEUX bookmakers pour comparer
+    # Besoin des DEUX bookmakers
     if len(bookie_odds) < 2:
         return []
 
     betfair_odds = bookie_odds.get("betfair_ex_eu", {})
-    bet365_odds  = bookie_odds.get("bet365", {})
+    unibet_odds  = bookie_odds.get("unibet_eu", {})
 
-    # Tous les outcomes disponibles
-    all_outcomes = set(betfair_odds.keys()) | set(bet365_odds.keys())
+    all_outcomes = set(betfair_odds.keys()) | set(unibet_odds.keys())
     if len(all_outcomes) < 2:
         return []
 
-    # ── Pour chaque outcome, meilleure cote et son bookie ──
+    # ── Meilleure cote pour chaque outcome ──
     best = {}
     for outcome in all_outcomes:
         bf = betfair_odds.get(outcome)
-        b3 = bet365_odds.get(outcome)
+        un = unibet_odds.get(outcome)
 
-        if bf and b3:
-            if bf >= b3:
-                best[outcome] = {"odd": bf, "bookie": "betfair_ex_eu"}
-            else:
-                best[outcome] = {"odd": b3, "bookie": "bet365"}
+        if bf and un:
+            best[outcome] = {"odd": bf, "bookie": "betfair_ex_eu"} if bf >= un else {"odd": un, "bookie": "unibet_eu"}
         elif bf:
             best[outcome] = {"odd": bf, "bookie": "betfair_ex_eu"}
-        elif b3:
-            best[outcome] = {"odd": b3, "bookie": "bet365"}
+        elif un:
+            best[outcome] = {"odd": un, "bookie": "unibet_eu"}
 
     if len(best) < 2:
         return []
 
     # ── Calcul arb ──
     total_prob = sum(1 / v["odd"] for v in best.values())
-
     if total_prob >= 1.0:
         return []
 
@@ -319,22 +308,16 @@ def find_arb_opportunities(game: dict, sport_label: str) -> list:
     for team_name, info in best.items():
         prob = 1 / info["odd"]
         stake = round((BANKROLL * prob) / total_prob, 2)
+        bf_odd = betfair_odds.get(team_name, "-")
+        un_odd = unibet_odds.get(team_name, "-")
         sides.append({
             "team": team_name,
             "odd": info["odd"],
             "bookie": info["bookie"],
             "stake": stake,
+            "betfair_odd": bf_odd,
+            "unibet_odd": un_odd,
         })
-
-    # Aussi afficher les cotes de l'autre bookie pour référence
-    sides_detail = []
-    for side in sides:
-        team = side["team"]
-        bf_odd = betfair_odds.get(team, "-")
-        b3_odd = bet365_odds.get(team, "-")
-        sides_detail.append({**side, "betfair_odd": bf_odd, "bet365_odd": b3_odd})
-
-    profit = round(BANKROLL * (1 / total_prob - 1), 2)
 
     return [{
         "sport": sport_label,
@@ -342,10 +325,9 @@ def find_arb_opportunities(game: dict, sport_label: str) -> list:
         "away": away,
         "commence": commence_str,
         "time_left": time_left,
-        "sides": sides_detail,
+        "sides": sides,
         "profit_pct": round(profit_pct, 2),
-        "profit": profit,
-        "total_prob": round(total_prob, 4),
+        "profit": round(BANKROLL * (1 / total_prob - 1), 2),
         "detected_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
     }]
 
@@ -367,9 +349,10 @@ def format_alert(opp: dict) -> str:
     )
 
     for side in opp["sides"]:
-        bookie_label = "📗 BETFAIR ⭐" if side["bookie"] == "betfair_ex_eu" else "📘 BET365 ⭐"
-        other_label  = "Bet365" if side["bookie"] == "betfair_ex_eu" else "Betfair"
-        other_odd    = side["bet365_odd"] if side["bookie"] == "betfair_ex_eu" else side["betfair_odd"]
+        is_betfair = side["bookie"] == "betfair_ex_eu"
+        bookie_label = "📗 BETFAIR ⭐" if is_betfair else "📘 UNIBET ⭐"
+        other_label  = "Unibet" if is_betfair else "Betfair"
+        other_odd    = side["unibet_odd"] if is_betfair else side["betfair_odd"]
 
         msg += (
             f"{bookie_label}\n"
