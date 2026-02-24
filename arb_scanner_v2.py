@@ -511,4 +511,3 @@ if __name__ == "__main__":
         analyze_results()
     else:
         run_scanner()
-  
