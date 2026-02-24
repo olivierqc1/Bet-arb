@@ -1,10 +1,16 @@
 """
 ╔══════════════════════════════════════════════════════╗
-║   ARB SCANNER v3 — Betfair + Bet365                 ║
-║   Optimisé pour The Odds API $10/mois               ║
+║   ARB SCANNER v4 — Betfair + Bet365                 ║
+║   Fix: détection arb correcte (2 et 3 outcomes)     ║
 ║   Sports: NBA + La Liga | Alertes: Telegram          ║
 ║   Commandes: /pause /resume /stats /help             ║
 ╚══════════════════════════════════════════════════════╝
+
+LOGIQUE CORRECTE:
+- Pour chaque outcome (Home/Draw/Away), on prend la MEILLEURE
+  cote disponible parmi tous les bookmakers
+- On calcule la somme des probabilités implicites inverses
+- Si somme < 1.0 → vrai arb, on affiche quel bookie pour chaque side
 """
 
 import os
@@ -14,31 +20,20 @@ import time
 import json
 import logging
 from datetime import datetime
-from itertools import combinations
 from pathlib import Path
 
 # ─────────────────────────────────────────────────────
-# ⚙️  CONFIG — Variables d'environnement Render
+# ⚙️  CONFIG
 # ─────────────────────────────────────────────────────
 
 ODDS_API_KEY        = os.environ.get("ODDS_API_KEY", "YOUR_ODDS_API_KEY")
 TELEGRAM_BOT_TOKEN  = os.environ.get("TELEGRAM_BOT_TOKEN", "YOUR_TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID    = os.environ.get("TELEGRAM_CHAT_ID", "YOUR_TELEGRAM_CHAT_ID")
 
-# Mode paper trading (True = alertes seulement, pas de vrais paris)
 PAPER_TRADING       = True
-
-# Profit minimum pour déclencher une alerte (en %)
 MIN_PROFIT_PCT      = 1.0
-
-# Bankroll simulée pour calculer les mises
 BANKROLL            = 100
-
-# Intervalle entre chaque scan (secondes)
-# 2 sports × 6/heure × 24h × 30j = 8 640 requêtes/mois → safe pour $10
-POLL_INTERVAL       = 600  # 10 minutes
-
-# Fichier de log des opportunités détectées
+POLL_INTERVAL       = 600   # 10 min = ~8 640 req/mois → safe $10
 LOG_FILE            = "arb_opportunities.json"
 
 # ─────────────────────────────────────────────────────
@@ -116,13 +111,6 @@ def send_telegram(message: str, silent: bool = False):
 # ─────────────────────────────────────────────────────
 
 def check_telegram_commands():
-    """
-    Vérifie les nouveaux messages et exécute les commandes.
-    /pause  → met le scanner en pause
-    /resume → reprend le scanner
-    /stats  → envoie le rapport de session
-    /help   → liste les commandes
-    """
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/getUpdates"
     params = {
         "offset": state["last_update_id"] + 1,
@@ -140,7 +128,6 @@ def check_telegram_commands():
             text = msg.get("text", "").strip().lower()
             chat_id = str(msg.get("chat", {}).get("id", ""))
 
-            # Sécurité: ignore les messages d'autres chats
             if chat_id != str(TELEGRAM_CHAT_ID):
                 continue
 
@@ -149,27 +136,24 @@ def check_telegram_commands():
                     send_telegram("⏸ Scanner déjà en pause.")
                 else:
                     state["paused"] = True
-                    log.info("⏸ Scanner mis en PAUSE via Telegram.")
+                    log.info("⏸ PAUSE via Telegram.")
                     send_telegram(
                         "⏸ <b>Scanner mis en pause.</b>\n"
-                        "Aucune requête API ne sera consommée.\n"
+                        "Aucune requête API consommée.\n"
                         "Envoie /resume pour reprendre."
                     )
-
             elif text == "/resume":
                 if not state["paused"]:
                     send_telegram("▶️ Scanner déjà actif.")
                 else:
                     state["paused"] = False
-                    log.info("▶️ Scanner REPRIS via Telegram.")
+                    log.info("▶️ REPRISE via Telegram.")
                     send_telegram(
-                        "▶️ <b>Scanner repris!</b>\n"
+                        f"▶️ <b>Scanner repris!</b>\n"
                         f"Prochain scan dans ~{POLL_INTERVAL // 60} minutes."
                     )
-
             elif text == "/stats":
                 send_stats_update()
-
             elif text == "/help":
                 send_telegram(
                     "🤖 <b>Commandes disponibles:</b>\n\n"
@@ -178,19 +162,14 @@ def check_telegram_commands():
                     "📊 /stats — Rapport de session\n"
                     "❓ /help — Affiche ce message"
                 )
-
     except Exception as e:
         log.error(f"Telegram getUpdates error: {e}")
 
 
-# ─────────────────────────────────────────────────────
-# 📱  TELEGRAM — MESSAGES SYSTÈME
-# ─────────────────────────────────────────────────────
-
 def send_startup_message():
     mode = "📄 PAPER TRADING" if PAPER_TRADING else "💰 LIVE BETTING"
     send_telegram(
-        f"🚀 <b>Arb Scanner v3 démarré</b>\n"
+        f"🚀 <b>Arb Scanner v4 démarré</b>\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
         f"Mode: <b>{mode}</b>\n"
         f"Sports: {', '.join(SPORTS.values())}\n"
@@ -256,11 +235,29 @@ def fetch_odds(sport_key: str) -> list:
 
 
 # ─────────────────────────────────────────────────────
-# 🔍  DÉTECTION D'ARB
+# 🔍  DÉTECTION D'ARB — LOGIQUE CORRIGÉE
 # ─────────────────────────────────────────────────────
 
 def find_arb_opportunities(game: dict, sport_label: str) -> list:
-    opportunities = []
+    """
+    LOGIQUE CORRECTE:
+
+    Pour chaque outcome possible (ex: Home, Draw, Away),
+    on trouve la MEILLEURE cote disponible parmi tous les bookmakers.
+
+    On calcule ensuite:
+        total_prob = sum(1 / meilleure_cote pour chaque outcome)
+
+    Si total_prob < 1.0 → vrai arb garanti.
+
+    Exemple soccer (3 outcomes):
+        Home @ 2.10 (Betfair)  → prob = 0.476
+        Draw @ 4.20 (Bwin)     → prob = 0.238
+        Away @ 5.50 (Bet365)   → prob = 0.182
+        total_prob = 0.896 < 1.0 → arb de 11.6% ✅
+
+    On calcule les mises optimales pour chaque side.
+    """
     home = game.get("home_team", "Home")
     away = game.get("away_team", "Away")
     commence_raw = game.get("commence_time", "")
@@ -271,90 +268,109 @@ def find_arb_opportunities(game: dict, sport_label: str) -> list:
     except Exception:
         commence_str = commence_raw
 
-    bookie_odds = {}
+    # ── Étape 1: Pour chaque outcome, trouver la meilleure cote et son bookie ──
+    # Structure: { "Real Madrid": {"odd": 2.10, "bookie": "betfair_ex_eu"}, ... }
+    best_odds = {}
+
     for bookmaker in game.get("bookmakers", []):
         bookie_key = bookmaker["key"]
         for market in bookmaker.get("markets", []):
             if market["key"] != "h2h":
                 continue
-            odds_map = {o["name"]: o["price"] for o in market.get("outcomes", [])}
-            if odds_map:
-                bookie_odds[bookie_key] = odds_map
+            for outcome in market.get("outcomes", []):
+                name = outcome["name"]
+                price = outcome["price"]
 
-    if len(bookie_odds) < 2:
-        return opportunities
+                # Garder seulement la meilleure cote pour cet outcome
+                if name not in best_odds or price > best_odds[name]["odd"]:
+                    best_odds[name] = {
+                        "odd": price,
+                        "bookie": bookie_key,
+                    }
 
-    for (bk1, odds1), (bk2, odds2) in combinations(bookie_odds.items(), 2):
-        teams = list(set(odds1.keys()) & set(odds2.keys()))
-        if len(teams) < 2:
-            continue
+    # Besoin d'au moins 2 outcomes (NBA) ou 3 (soccer)
+    if len(best_odds) < 2:
+        return []
 
-        for t1, t2 in [(teams[0], teams[1]), (teams[1], teams[0])]:
-            odd1 = odds1.get(t1)
-            odd2 = odds2.get(t2)
-            if not odd1 or not odd2:
-                continue
+    # ── Étape 2: Calculer la somme des probabilités implicites ──
+    outcomes = list(best_odds.items())
+    total_prob = sum(1 / o["odd"] for _, o in outcomes)
 
-            prob1 = 1 / odd1
-            prob2 = 1 / odd2
-            total_prob = prob1 + prob2
+    # Si total_prob >= 1.0 → pas d'arb
+    if total_prob >= 1.0:
+        return []
 
-            if total_prob >= 1.0:
-                continue
+    profit_pct = (1 / total_prob - 1) * 100
 
-            profit_pct = (1 / total_prob - 1) * 100
-            if profit_pct < MIN_PROFIT_PCT:
-                continue
+    if profit_pct < MIN_PROFIT_PCT:
+        return []
 
-            stake1 = round((BANKROLL * prob1) / total_prob, 2)
-            stake2 = round((BANKROLL * prob2) / total_prob, 2)
-            profit = round(BANKROLL * (1 / total_prob - 1), 2)
+    # ── Étape 3: Calculer les mises optimales ──
+    # Mise optimale pour chaque side = BANKROLL * (prob_side / total_prob)
+    sides = []
+    for team_name, info in outcomes:
+        prob = 1 / info["odd"]
+        stake = round((BANKROLL * prob) / total_prob, 2)
+        sides.append({
+            "team": team_name,
+            "odd": info["odd"],
+            "bookie": info["bookie"],
+            "stake": stake,
+            "is_priority": info["bookie"] in PRIORITY_BOOKS,
+        })
 
-            opportunities.append({
-                "sport": sport_label,
-                "home": home,
-                "away": away,
-                "commence": commence_str,
-                "bookie1": bk1,
-                "team1": t1,
-                "odd1": odd1,
-                "stake1": stake1,
-                "bookie2": bk2,
-                "team2": t2,
-                "odd2": odd2,
-                "stake2": stake2,
-                "profit_pct": round(profit_pct, 2),
-                "profit": profit,
-                "has_priority": bk1 in PRIORITY_BOOKS or bk2 in PRIORITY_BOOKS,
-                "detected_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            })
+    profit = round(BANKROLL * (1 / total_prob - 1), 2)
+    has_priority = any(s["is_priority"] for s in sides)
 
-    opportunities.sort(key=lambda x: (x["has_priority"], x["profit_pct"]), reverse=True)
-    return opportunities
+    return [{
+        "sport": sport_label,
+        "home": home,
+        "away": away,
+        "commence": commence_str,
+        "sides": sides,
+        "profit_pct": round(profit_pct, 2),
+        "profit": profit,
+        "total_prob": round(total_prob, 4),
+        "has_priority": has_priority,
+        "detected_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+    }]
 
 
 # ─────────────────────────────────────────────────────
 # 💬  FORMAT ALERTE
 # ─────────────────────────────────────────────────────
 
+EMOJI_BOOKIE = {
+    "betfair_ex_eu": "📗",
+    "bet365":        "📘",
+    "unibet_eu":     "📙",
+    "william_hill":  "📕",
+    "bwin":          "📓",
+    "marathonbet":   "📔",
+}
+
 def format_alert(opp: dict) -> str:
     mode_tag = "📄 PAPER" if PAPER_TRADING else "💰 LIVE"
     p = opp["profit_pct"]
     profit_emoji = "🤑" if p >= 5 else "💰" if p >= 3 else "✅" if p >= 2 else "⚡"
-    b1_tag = " ⭐" if opp["bookie1"] in PRIORITY_BOOKS else ""
-    b2_tag = " ⭐" if opp["bookie2"] in PRIORITY_BOOKS else ""
 
     msg = (
         f"{profit_emoji} <b>ARB DETECTED [{mode_tag}] — {opp['sport']}</b>\n"
         f"<b>{opp['away']} @ {opp['home']}</b>\n"
         f"🕐 {opp['commence']}\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
-        f"📗 <b>{opp['bookie1'].upper()}</b>{b1_tag}\n"
-        f"   {opp['team1']} @ <b>{opp['odd1']}</b>\n"
-        f"   Mise: <b>${opp['stake1']}</b>\n\n"
-        f"📘 <b>{opp['bookie2'].upper()}</b>{b2_tag}\n"
-        f"   {opp['team2']} @ <b>{opp['odd2']}</b>\n"
-        f"   Mise: <b>${opp['stake2']}</b>\n"
+    )
+
+    for side in opp["sides"]:
+        emoji = EMOJI_BOOKIE.get(side["bookie"], "📒")
+        star = " ⭐" if side["is_priority"] else ""
+        msg += (
+            f"{emoji} <b>{side['bookie'].upper()}</b>{star}\n"
+            f"   {side['team']} @ <b>{side['odd']}</b>\n"
+            f"   Mise: <b>${side['stake']}</b>\n\n"
+        )
+
+    msg += (
         f"━━━━━━━━━━━━━━━━━━━━\n"
         f"{profit_emoji} Profit garanti: <b>${opp['profit']}</b> (<b>{opp['profit_pct']}%</b>)\n"
         f"   Sur bankroll de ${BANKROLL}\n"
@@ -365,7 +381,7 @@ def format_alert(opp: dict) -> str:
 
 
 # ─────────────────────────────────────────────────────
-# 💾  LOG DES OPPORTUNITÉS
+# 💾  LOG
 # ─────────────────────────────────────────────────────
 
 def log_opportunity(opp: dict):
@@ -387,7 +403,7 @@ def log_opportunity(opp: dict):
 # ─────────────────────────────────────────────────────
 
 def run_scanner():
-    log.info("🚀 ARB SCANNER v3 STARTED")
+    log.info("🚀 ARB SCANNER v4 STARTED")
     send_startup_message()
 
     seen_opps = {}
@@ -396,16 +412,13 @@ def run_scanner():
 
     while True:
         try:
-            # Check commandes Telegram
             check_telegram_commands()
 
-            # En pause → attendre et re-check toutes les 15s
             if state["paused"]:
                 log.info("⏸ En pause...")
                 time.sleep(15)
                 continue
 
-            # ── SCAN ──
             session_stats["scans"] += 1
             log.info(f"─── Scan #{session_stats['scans']} ───")
 
@@ -415,10 +428,13 @@ def run_scanner():
                 for game in games:
                     all_opps.extend(find_arb_opportunities(game, sport_label))
 
+            # Trier par profit décroissant, priorité aux bookmakers cibles
+            all_opps.sort(key=lambda x: (x["has_priority"], x["profit_pct"]), reverse=True)
+
             if all_opps:
-                log.info(f"🎯 {len(all_opps)} opportunité(s)")
+                log.info(f"🎯 {len(all_opps)} opportunité(s) détectée(s)")
                 for opp in all_opps:
-                    key = f"{opp['home']}-{opp['bookie1']}-{opp['bookie2']}-{opp['team1']}"
+                    key = f"{opp['home']}-{opp['away']}-{opp['profit_pct']}"
                     now = time.time()
                     if key in seen_opps and (now - seen_opps[key]) < 600:
                         continue
@@ -433,14 +449,13 @@ def run_scanner():
             else:
                 log.info("❌ Aucune opportunité.")
 
-            # Rapport horaire
             if time.time() - last_report > REPORT_INTERVAL:
                 send_stats_update()
                 last_report = time.time()
 
             seen_opps = {k: v for k, v in seen_opps.items() if time.time() - v < 600}
 
-            # Attente entre scans — check commandes toutes les 15s
+            # Attente avec check commandes toutes les 15s
             elapsed = 0
             while elapsed < POLL_INTERVAL:
                 time.sleep(15)
@@ -488,14 +503,6 @@ def analyze_results():
     print(f"\n📋 Par sport:")
     for sport, count in sorted(sports.items(), key=lambda x: -x[1]):
         print(f"   {sport}: {count} opps")
-
-    pairs = {}
-    for o in opps:
-        pair = f"{o['bookie1']} vs {o['bookie2']}"
-        pairs[pair] = pairs.get(pair, 0) + 1
-    print(f"\n🔀 Top paires bookmakers:")
-    for pair, count in sorted(pairs.items(), key=lambda x: -x[1])[:5]:
-        print(f"   {pair}: {count} opps")
 
     total_profit = sum(o["profit"] for o in opps)
     print(f"\n💰 Profit total simulé (${BANKROLL}/opp): ${total_profit:.2f}")
