@@ -1,16 +1,16 @@
 """
 ╔══════════════════════════════════════════════════════╗
-║   ARB SCANNER v4 — Betfair + Bet365                 ║
-║   Fix: détection arb correcte (2 et 3 outcomes)     ║
+║   ARB SCANNER v5 — Betfair vs Bet365 UNIQUEMENT     ║
+║   Pré-match seulement (temps de miser = heures)     ║
 ║   Sports: NBA + La Liga | Alertes: Telegram          ║
 ║   Commandes: /pause /resume /stats /help             ║
 ╚══════════════════════════════════════════════════════╝
 
-LOGIQUE CORRECTE:
-- Pour chaque outcome (Home/Draw/Away), on prend la MEILLEURE
-  cote disponible parmi tous les bookmakers
-- On calcule la somme des probabilités implicites inverses
-- Si somme < 1.0 → vrai arb, on affiche quel bookie pour chaque side
+LOGIQUE:
+- On prend les cotes Betfair ET Bet365 pour chaque outcome
+- Pour chaque outcome, on garde la MEILLEURE cote entre les deux
+- Si la somme des meilleures proba < 1.0 → vrai arb
+- Seulement les matchs qui n'ont pas encore commencé (pré-match)
 """
 
 import os
@@ -19,7 +19,7 @@ import requests
 import time
 import json
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 # ─────────────────────────────────────────────────────
@@ -36,24 +36,17 @@ BANKROLL            = 100
 POLL_INTERVAL       = 600   # 10 min = ~8 640 req/mois → safe $10
 LOG_FILE            = "arb_opportunities.json"
 
+# Les 2 seuls bookmakers qu'on compare
+BOOKS = ["betfair_ex_eu", "bet365"]
+
 # ─────────────────────────────────────────────────────
-# 🏟️  SPORTS & BOOKMAKERS
+# 🏟️  SPORTS
 # ─────────────────────────────────────────────────────
 
 SPORTS = {
     "basketball_nba":        "🏀 NBA",
     "soccer_spain_la_liga":  "⚽ La Liga",
 }
-
-PRIORITY_BOOKS = ["betfair_ex_eu", "bet365"]
-ALL_BOOKS = [
-    "betfair_ex_eu",
-    "bet365",
-    "unibet_eu",
-    "william_hill",
-    "bwin",
-    "marathonbet",
-]
 
 # ─────────────────────────────────────────────────────
 # 🎮  ÉTAT GLOBAL
@@ -136,7 +129,6 @@ def check_telegram_commands():
                     send_telegram("⏸ Scanner déjà en pause.")
                 else:
                     state["paused"] = True
-                    log.info("⏸ PAUSE via Telegram.")
                     send_telegram(
                         "⏸ <b>Scanner mis en pause.</b>\n"
                         "Aucune requête API consommée.\n"
@@ -147,10 +139,9 @@ def check_telegram_commands():
                     send_telegram("▶️ Scanner déjà actif.")
                 else:
                     state["paused"] = False
-                    log.info("▶️ REPRISE via Telegram.")
                     send_telegram(
                         f"▶️ <b>Scanner repris!</b>\n"
-                        f"Prochain scan dans ~{POLL_INTERVAL // 60} minutes."
+                        f"Prochain scan dans ~{POLL_INTERVAL // 60} min."
                     )
             elif text == "/stats":
                 send_stats_update()
@@ -169,11 +160,12 @@ def check_telegram_commands():
 def send_startup_message():
     mode = "📄 PAPER TRADING" if PAPER_TRADING else "💰 LIVE BETTING"
     send_telegram(
-        f"🚀 <b>Arb Scanner v4 démarré</b>\n"
+        f"🚀 <b>Arb Scanner v5 démarré</b>\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
         f"Mode: <b>{mode}</b>\n"
         f"Sports: {', '.join(SPORTS.values())}\n"
-        f"Bookmakers: {', '.join(ALL_BOOKS)}\n"
+        f"Bookmakers: <b>Betfair ⭐ vs Bet365 ⭐</b>\n"
+        f"Type: <b>Pré-match uniquement</b>\n"
         f"Min profit: <b>{MIN_PROFIT_PCT}%</b>\n"
         f"Bankroll: <b>${BANKROLL}</b>\n"
         f"Interval: <b>{POLL_INTERVAL // 60} min</b>\n"
@@ -211,7 +203,7 @@ def fetch_odds(sport_key: str) -> list:
         "regions": "eu",
         "markets": "h2h",
         "oddsFormat": "decimal",
-        "bookmakers": ",".join(ALL_BOOKS),
+        "bookmakers": ",".join(BOOKS),
     }
     try:
         r = requests.get(url, params=params, timeout=10)
@@ -235,80 +227,96 @@ def fetch_odds(sport_key: str) -> list:
 
 
 # ─────────────────────────────────────────────────────
-# 🔍  DÉTECTION D'ARB — LOGIQUE CORRIGÉE
+# 🔍  DÉTECTION D'ARB — BETFAIR vs BET365
 # ─────────────────────────────────────────────────────
 
 def find_arb_opportunities(game: dict, sport_label: str) -> list:
     """
-    LOGIQUE CORRECTE:
+    Pour chaque outcome (Home, Draw, Away):
+      - On prend la meilleure cote entre Betfair et Bet365
+      - On note quel bookie offre cette meilleure cote
+    Si sum(1/meilleure_cote) < 1.0 → arb ✅
 
-    Pour chaque outcome possible (ex: Home, Draw, Away),
-    on trouve la MEILLEURE cote disponible parmi tous les bookmakers.
-
-    On calcule ensuite:
-        total_prob = sum(1 / meilleure_cote pour chaque outcome)
-
-    Si total_prob < 1.0 → vrai arb garanti.
-
-    Exemple soccer (3 outcomes):
-        Home @ 2.10 (Betfair)  → prob = 0.476
-        Draw @ 4.20 (Bwin)     → prob = 0.238
-        Away @ 5.50 (Bet365)   → prob = 0.182
-        total_prob = 0.896 < 1.0 → arb de 11.6% ✅
-
-    On calcule les mises optimales pour chaque side.
+    Pré-match seulement : on ignore les matchs déjà commencés.
     """
     home = game.get("home_team", "Home")
     away = game.get("away_team", "Away")
     commence_raw = game.get("commence_time", "")
 
+    # ── Filtre pré-match ──
     try:
         commence_dt = datetime.fromisoformat(commence_raw.replace("Z", "+00:00"))
+        now_utc = datetime.now(timezone.utc)
+        if commence_dt <= now_utc:
+            return []  # Match déjà commencé, on skip
         commence_str = commence_dt.strftime("%d/%m %H:%M UTC")
+        # Temps restant avant le match
+        delta = commence_dt - now_utc
+        hours_left = int(delta.total_seconds() // 3600)
+        mins_left = int((delta.total_seconds() % 3600) // 60)
+        time_left = f"{hours_left}h {mins_left}m"
     except Exception:
         commence_str = commence_raw
+        time_left = "?"
 
-    # ── Étape 1: Pour chaque outcome, trouver la meilleure cote et son bookie ──
-    # Structure: { "Real Madrid": {"odd": 2.10, "bookie": "betfair_ex_eu"}, ... }
-    best_odds = {}
-
+    # ── Collecter les cotes par bookie ──
+    # bookie_odds = { "betfair_ex_eu": {"Real Madrid": 2.10, "Draw": 3.5, ...}, ... }
+    bookie_odds = {}
     for bookmaker in game.get("bookmakers", []):
         bookie_key = bookmaker["key"]
+        if bookie_key not in BOOKS:
+            continue
         for market in bookmaker.get("markets", []):
             if market["key"] != "h2h":
                 continue
-            for outcome in market.get("outcomes", []):
-                name = outcome["name"]
-                price = outcome["price"]
+            odds_map = {o["name"]: o["price"] for o in market.get("outcomes", [])}
+            if odds_map:
+                bookie_odds[bookie_key] = odds_map
 
-                # Garder seulement la meilleure cote pour cet outcome
-                if name not in best_odds or price > best_odds[name]["odd"]:
-                    best_odds[name] = {
-                        "odd": price,
-                        "bookie": bookie_key,
-                    }
-
-    # Besoin d'au moins 2 outcomes (NBA) ou 3 (soccer)
-    if len(best_odds) < 2:
+    # Besoin des DEUX bookmakers pour comparer
+    if len(bookie_odds) < 2:
         return []
 
-    # ── Étape 2: Calculer la somme des probabilités implicites ──
-    outcomes = list(best_odds.items())
-    total_prob = sum(1 / o["odd"] for _, o in outcomes)
+    betfair_odds = bookie_odds.get("betfair_ex_eu", {})
+    bet365_odds  = bookie_odds.get("bet365", {})
 
-    # Si total_prob >= 1.0 → pas d'arb
+    # Tous les outcomes disponibles
+    all_outcomes = set(betfair_odds.keys()) | set(bet365_odds.keys())
+    if len(all_outcomes) < 2:
+        return []
+
+    # ── Pour chaque outcome, meilleure cote et son bookie ──
+    best = {}
+    for outcome in all_outcomes:
+        bf = betfair_odds.get(outcome)
+        b3 = bet365_odds.get(outcome)
+
+        if bf and b3:
+            if bf >= b3:
+                best[outcome] = {"odd": bf, "bookie": "betfair_ex_eu"}
+            else:
+                best[outcome] = {"odd": b3, "bookie": "bet365"}
+        elif bf:
+            best[outcome] = {"odd": bf, "bookie": "betfair_ex_eu"}
+        elif b3:
+            best[outcome] = {"odd": b3, "bookie": "bet365"}
+
+    if len(best) < 2:
+        return []
+
+    # ── Calcul arb ──
+    total_prob = sum(1 / v["odd"] for v in best.values())
+
     if total_prob >= 1.0:
         return []
 
     profit_pct = (1 / total_prob - 1) * 100
-
     if profit_pct < MIN_PROFIT_PCT:
         return []
 
-    # ── Étape 3: Calculer les mises optimales ──
-    # Mise optimale pour chaque side = BANKROLL * (prob_side / total_prob)
+    # ── Mises optimales ──
     sides = []
-    for team_name, info in outcomes:
+    for team_name, info in best.items():
         prob = 1 / info["odd"]
         stake = round((BANKROLL * prob) / total_prob, 2)
         sides.append({
@@ -316,22 +324,28 @@ def find_arb_opportunities(game: dict, sport_label: str) -> list:
             "odd": info["odd"],
             "bookie": info["bookie"],
             "stake": stake,
-            "is_priority": info["bookie"] in PRIORITY_BOOKS,
         })
 
+    # Aussi afficher les cotes de l'autre bookie pour référence
+    sides_detail = []
+    for side in sides:
+        team = side["team"]
+        bf_odd = betfair_odds.get(team, "-")
+        b3_odd = bet365_odds.get(team, "-")
+        sides_detail.append({**side, "betfair_odd": bf_odd, "bet365_odd": b3_odd})
+
     profit = round(BANKROLL * (1 / total_prob - 1), 2)
-    has_priority = any(s["is_priority"] for s in sides)
 
     return [{
         "sport": sport_label,
         "home": home,
         "away": away,
         "commence": commence_str,
-        "sides": sides,
+        "time_left": time_left,
+        "sides": sides_detail,
         "profit_pct": round(profit_pct, 2),
         "profit": profit,
         "total_prob": round(total_prob, 4),
-        "has_priority": has_priority,
         "detected_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
     }]
 
@@ -339,15 +353,6 @@ def find_arb_opportunities(game: dict, sport_label: str) -> list:
 # ─────────────────────────────────────────────────────
 # 💬  FORMAT ALERTE
 # ─────────────────────────────────────────────────────
-
-EMOJI_BOOKIE = {
-    "betfair_ex_eu": "📗",
-    "bet365":        "📘",
-    "unibet_eu":     "📙",
-    "william_hill":  "📕",
-    "bwin":          "📓",
-    "marathonbet":   "📔",
-}
 
 def format_alert(opp: dict) -> str:
     mode_tag = "📄 PAPER" if PAPER_TRADING else "💰 LIVE"
@@ -357,16 +362,19 @@ def format_alert(opp: dict) -> str:
     msg = (
         f"{profit_emoji} <b>ARB DETECTED [{mode_tag}] — {opp['sport']}</b>\n"
         f"<b>{opp['away']} @ {opp['home']}</b>\n"
-        f"🕐 {opp['commence']}\n"
+        f"🕐 {opp['commence']} (<b>{opp['time_left']} restant</b>)\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
     )
 
     for side in opp["sides"]:
-        emoji = EMOJI_BOOKIE.get(side["bookie"], "📒")
-        star = " ⭐" if side["is_priority"] else ""
+        bookie_label = "📗 BETFAIR ⭐" if side["bookie"] == "betfair_ex_eu" else "📘 BET365 ⭐"
+        other_label  = "Bet365" if side["bookie"] == "betfair_ex_eu" else "Betfair"
+        other_odd    = side["bet365_odd"] if side["bookie"] == "betfair_ex_eu" else side["betfair_odd"]
+
         msg += (
-            f"{emoji} <b>{side['bookie'].upper()}</b>{star}\n"
-            f"   {side['team']} @ <b>{side['odd']}</b>\n"
+            f"{bookie_label}\n"
+            f"   {side['team']} @ <b>{side['odd']}</b> ← meilleure cote\n"
+            f"   (vs {other_label}: {other_odd})\n"
             f"   Mise: <b>${side['stake']}</b>\n\n"
         )
 
@@ -376,7 +384,7 @@ def format_alert(opp: dict) -> str:
         f"   Sur bankroll de ${BANKROLL}\n"
         f"⏱ Détecté: {opp['detected_at']}\n"
     )
-    msg += "⚠️ <b>AGIS VITE!</b>" if not PAPER_TRADING else "📄 <i>Paper trade — aucun vrai pari placé</i>"
+    msg += "⚠️ <b>VÉRIFIE les cotes avant de miser!</b>" if not PAPER_TRADING else "📄 <i>Paper trade — aucun vrai pari placé</i>"
     return msg
 
 
@@ -403,7 +411,7 @@ def log_opportunity(opp: dict):
 # ─────────────────────────────────────────────────────
 
 def run_scanner():
-    log.info("🚀 ARB SCANNER v4 STARTED")
+    log.info("🚀 ARB SCANNER v5 STARTED")
     send_startup_message()
 
     seen_opps = {}
@@ -428,11 +436,10 @@ def run_scanner():
                 for game in games:
                     all_opps.extend(find_arb_opportunities(game, sport_label))
 
-            # Trier par profit décroissant, priorité aux bookmakers cibles
-            all_opps.sort(key=lambda x: (x["has_priority"], x["profit_pct"]), reverse=True)
+            all_opps.sort(key=lambda x: x["profit_pct"], reverse=True)
 
             if all_opps:
-                log.info(f"🎯 {len(all_opps)} opportunité(s) détectée(s)")
+                log.info(f"🎯 {len(all_opps)} opportunité(s)")
                 for opp in all_opps:
                     key = f"{opp['home']}-{opp['away']}-{opp['profit_pct']}"
                     now = time.time()
@@ -444,7 +451,7 @@ def run_scanner():
                         session_stats["best_profit_pct"] = opp["profit_pct"]
                     send_telegram(format_alert(opp))
                     log_opportunity(opp)
-                    log.info(f"✅ {opp['profit_pct']}% | {opp['away']} @ {opp['home']}")
+                    log.info(f"✅ {opp['profit_pct']}% | {opp['away']} @ {opp['home']} | {opp['time_left']} restant")
                     time.sleep(1)
             else:
                 log.info("❌ Aucune opportunité.")
@@ -455,7 +462,6 @@ def run_scanner():
 
             seen_opps = {k: v for k, v in seen_opps.items() if time.time() - v < 600}
 
-            # Attente avec check commandes toutes les 15s
             elapsed = 0
             while elapsed < POLL_INTERVAL:
                 time.sleep(15)
