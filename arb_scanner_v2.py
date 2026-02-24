@@ -1,8 +1,7 @@
 """
 ╔══════════════════════════════════════════════════════╗
-║   ARB SCANNER v5 — Betfair vs Unibet                ║
-║   Pré-match seulement                               ║
-║   Sports: NBA + La Liga | Alertes: Telegram          ║
+║   ARB SCANNER v6 — Betfair + Unibet + Marathonbet   ║
+║   6 sports | Pré-match uniquement                   ║
 ║   Commandes: /pause /resume /stats /help             ║
 ╚══════════════════════════════════════════════════════╝
 """
@@ -27,23 +26,34 @@ TELEGRAM_CHAT_ID    = os.environ.get("TELEGRAM_CHAT_ID", "YOUR_TELEGRAM_CHAT_ID"
 PAPER_TRADING       = True
 MIN_PROFIT_PCT      = 1.0
 BANKROLL            = 100
-POLL_INTERVAL       = 600   # 10 min = ~8 640 req/mois → safe $10
+POLL_INTERVAL       = 600   # 10 min
 LOG_FILE            = "arb_opportunities.json"
 
-# Les 2 bookmakers comparés
-BOOKS = ["betfair_ex_eu", "unibet_eu"]
+# ─────────────────────────────────────────────────────
+# 🏟️  BOOKMAKERS
+# ─────────────────────────────────────────────────────
+
+BOOKS = ["betfair_ex_eu", "unibet_eu", "marathonbet"]
+
 BOOK_LABELS = {
-    "betfair_ex_eu": "BETFAIR",
-    "unibet_eu":     "UNIBET",
+    "betfair_ex_eu": "📗 BETFAIR ⭐",
+    "unibet_eu":     "📘 UNIBET ⭐",
+    "marathonbet":   "📙 MARATHONBET",
 }
 
+PRIORITY_BOOKS = ["betfair_ex_eu", "unibet_eu"]
+
 # ─────────────────────────────────────────────────────
-# 🏟️  SPORTS
+# 🏟️  SPORTS (6 ligues)
 # ─────────────────────────────────────────────────────
 
 SPORTS = {
-    "basketball_nba":        "🏀 NBA",
-    "soccer_spain_la_liga":  "⚽ La Liga",
+    "basketball_nba":               "🏀 NBA",
+    "soccer_spain_la_liga":         "⚽ La Liga",
+    "soccer_epl":                   "⚽ Premier League",
+    "soccer_uefa_champs_league":    "⚽ Champions League",
+    "soccer_italy_serie_a":         "⚽ Serie A",
+    "soccer_france_ligue_one":      "⚽ Ligue 1",
 }
 
 # ─────────────────────────────────────────────────────
@@ -149,7 +159,9 @@ def check_telegram_commands():
                     "⏸ /pause — Met le scanner en pause\n"
                     "▶️ /resume — Reprend le scanner\n"
                     "📊 /stats — Rapport de session\n"
-                    "❓ /help — Affiche ce message"
+                    "❓ /help — Affiche ce message\n\n"
+                    "💡 <i>Astuce: mets en pause la nuit\n"
+                    "pour économiser tes crédits API!</i>"
                 )
     except Exception as e:
         log.error(f"Telegram getUpdates error: {e}")
@@ -157,18 +169,20 @@ def check_telegram_commands():
 
 def send_startup_message():
     mode = "📄 PAPER TRADING" if PAPER_TRADING else "💰 LIVE BETTING"
+    sports_list = "\n".join(f"   {v}" for v in SPORTS.values())
     send_telegram(
-        f"🚀 <b>Arb Scanner v5 démarré</b>\n"
+        f"🚀 <b>Arb Scanner v6 démarré</b>\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
         f"Mode: <b>{mode}</b>\n"
-        f"Sports: {', '.join(SPORTS.values())}\n"
-        f"Bookmakers: <b>Betfair ⭐ vs Unibet ⭐</b>\n"
+        f"Bookmakers: <b>Betfair + Unibet + Marathonbet</b>\n"
         f"Type: <b>Pré-match uniquement</b>\n"
+        f"Sports:\n{sports_list}\n"
         f"Min profit: <b>{MIN_PROFIT_PCT}%</b>\n"
         f"Bankroll: <b>${BANKROLL}</b>\n"
         f"Interval: <b>{POLL_INTERVAL // 60} min</b>\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
-        f"💬 Commandes: /pause /resume /stats /help"
+        f"💬 /pause /resume /stats /help\n"
+        f"💡 <i>Pense à /pause la nuit!</i>"
     )
 
 
@@ -225,21 +239,20 @@ def fetch_odds(sport_key: str) -> list:
 
 
 # ─────────────────────────────────────────────────────
-# 🔍  DÉTECTION D'ARB — BETFAIR vs UNIBET
+# 🔍  DÉTECTION D'ARB
 # ─────────────────────────────────────────────────────
 
 def find_arb_opportunities(game: dict, sport_label: str) -> list:
     """
-    Pour chaque outcome (Home, Draw, Away):
-      - Meilleure cote entre Betfair et Unibet
-      - Si sum(1/meilleure_cote) < 1.0 → arb ✅
+    Pour chaque outcome, prend la MEILLEURE cote parmi tous les bookmakers.
+    Si sum(1/meilleure_cote) < 1.0 → vrai arb.
     Pré-match uniquement.
     """
     home = game.get("home_team", "Home")
     away = game.get("away_team", "Away")
     commence_raw = game.get("commence_time", "")
 
-    # ── Filtre pré-match ──
+    # Filtre pré-match
     try:
         commence_dt = datetime.fromisoformat(commence_raw.replace("Z", "+00:00"))
         now_utc = datetime.now(timezone.utc)
@@ -254,7 +267,7 @@ def find_arb_opportunities(game: dict, sport_label: str) -> list:
         commence_str = commence_raw
         time_left = "?"
 
-    # ── Cotes par bookie ──
+    # Collecter cotes par bookie
     bookie_odds = {}
     for bookmaker in game.get("bookmakers", []):
         bookie_key = bookmaker["key"]
@@ -267,34 +280,41 @@ def find_arb_opportunities(game: dict, sport_label: str) -> list:
             if odds_map:
                 bookie_odds[bookie_key] = odds_map
 
-    # Besoin des DEUX bookmakers
     if len(bookie_odds) < 2:
         return []
 
-    betfair_odds = bookie_odds.get("betfair_ex_eu", {})
-    unibet_odds  = bookie_odds.get("unibet_eu", {})
+    # Tous les outcomes disponibles
+    all_outcomes = set()
+    for odds in bookie_odds.values():
+        all_outcomes.update(odds.keys())
 
-    all_outcomes = set(betfair_odds.keys()) | set(unibet_odds.keys())
     if len(all_outcomes) < 2:
         return []
 
-    # ── Meilleure cote pour chaque outcome ──
+    # Pour chaque outcome → meilleure cote et son bookie
     best = {}
-    for outcome in all_outcomes:
-        bf = betfair_odds.get(outcome)
-        un = unibet_odds.get(outcome)
+    all_odds_by_outcome = {}  # Pour afficher toutes les cotes dans l'alerte
 
-        if bf and un:
-            best[outcome] = {"odd": bf, "bookie": "betfair_ex_eu"} if bf >= un else {"odd": un, "bookie": "unibet_eu"}
-        elif bf:
-            best[outcome] = {"odd": bf, "bookie": "betfair_ex_eu"}
-        elif un:
-            best[outcome] = {"odd": un, "bookie": "unibet_eu"}
+    for outcome in all_outcomes:
+        all_odds_by_outcome[outcome] = {}
+        best_price = 0
+        best_bookie = None
+
+        for bookie, odds in bookie_odds.items():
+            price = odds.get(outcome)
+            if price:
+                all_odds_by_outcome[outcome][bookie] = price
+                if price > best_price:
+                    best_price = price
+                    best_bookie = bookie
+
+        if best_bookie:
+            best[outcome] = {"odd": best_price, "bookie": best_bookie}
 
     if len(best) < 2:
         return []
 
-    # ── Calcul arb ──
+    # Calcul arb
     total_prob = sum(1 / v["odd"] for v in best.values())
     if total_prob >= 1.0:
         return []
@@ -303,21 +323,21 @@ def find_arb_opportunities(game: dict, sport_label: str) -> list:
     if profit_pct < MIN_PROFIT_PCT:
         return []
 
-    # ── Mises optimales ──
+    # Mises optimales
     sides = []
     for team_name, info in best.items():
         prob = 1 / info["odd"]
         stake = round((BANKROLL * prob) / total_prob, 2)
-        bf_odd = betfair_odds.get(team_name, "-")
-        un_odd = unibet_odds.get(team_name, "-")
         sides.append({
             "team": team_name,
             "odd": info["odd"],
             "bookie": info["bookie"],
             "stake": stake,
-            "betfair_odd": bf_odd,
-            "unibet_odd": un_odd,
+            "all_odds": all_odds_by_outcome.get(team_name, {}),
+            "is_priority": info["bookie"] in PRIORITY_BOOKS,
         })
+
+    has_priority = any(s["is_priority"] for s in sides)
 
     return [{
         "sport": sport_label,
@@ -328,6 +348,7 @@ def find_arb_opportunities(game: dict, sport_label: str) -> list:
         "sides": sides,
         "profit_pct": round(profit_pct, 2),
         "profit": round(BANKROLL * (1 / total_prob - 1), 2),
+        "has_priority": has_priority,
         "detected_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
     }]
 
@@ -349,15 +370,17 @@ def format_alert(opp: dict) -> str:
     )
 
     for side in opp["sides"]:
-        is_betfair = side["bookie"] == "betfair_ex_eu"
-        bookie_label = "📗 BETFAIR ⭐" if is_betfair else "📘 UNIBET ⭐"
-        other_label  = "Unibet" if is_betfair else "Betfair"
-        other_odd    = side["unibet_odd"] if is_betfair else side["betfair_odd"]
-
+        label = BOOK_LABELS.get(side["bookie"], side["bookie"].upper())
+        # Autres cotes pour comparaison
+        others = ", ".join(
+            f"{BOOK_LABELS.get(bk, bk).split()[1] if ' ' in BOOK_LABELS.get(bk, bk) else bk}: {odd}"
+            for bk, odd in side["all_odds"].items()
+            if bk != side["bookie"]
+        )
         msg += (
-            f"{bookie_label}\n"
-            f"   {side['team']} @ <b>{side['odd']}</b> ← meilleure cote\n"
-            f"   (vs {other_label}: {other_odd})\n"
+            f"{label}\n"
+            f"   {side['team']} @ <b>{side['odd']}</b> ← meilleure\n"
+            f"   (autres: {others})\n"
             f"   Mise: <b>${side['stake']}</b>\n\n"
         )
 
@@ -394,7 +417,7 @@ def log_opportunity(opp: dict):
 # ─────────────────────────────────────────────────────
 
 def run_scanner():
-    log.info("🚀 ARB SCANNER v5 STARTED")
+    log.info("🚀 ARB SCANNER v6 STARTED")
     send_startup_message()
 
     seen_opps = {}
@@ -419,7 +442,8 @@ def run_scanner():
                 for game in games:
                     all_opps.extend(find_arb_opportunities(game, sport_label))
 
-            all_opps.sort(key=lambda x: x["profit_pct"], reverse=True)
+            # Trier: priorité aux bookmakers cibles, puis par profit
+            all_opps.sort(key=lambda x: (x["has_priority"], x["profit_pct"]), reverse=True)
 
             if all_opps:
                 log.info(f"🎯 {len(all_opps)} opportunité(s)")
@@ -434,7 +458,7 @@ def run_scanner():
                         session_stats["best_profit_pct"] = opp["profit_pct"]
                     send_telegram(format_alert(opp))
                     log_opportunity(opp)
-                    log.info(f"✅ {opp['profit_pct']}% | {opp['away']} @ {opp['home']} | {opp['time_left']} restant")
+                    log.info(f"✅ {opp['profit_pct']}% | {opp['away']} @ {opp['home']} | {opp['time_left']}")
                     time.sleep(1)
             else:
                 log.info("❌ Aucune opportunité.")
