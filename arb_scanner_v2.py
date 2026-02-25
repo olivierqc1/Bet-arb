@@ -1,9 +1,19 @@
 """
 ╔══════════════════════════════════════════════════════╗
-║   ARB SCANNER v6 — Betfair + Unibet + Marathonbet   ║
+║   ARB SCANNER v7 — Betfair + William Hill + Bwin    ║
 ║   6 sports | Pré-match uniquement                   ║
 ║   Commandes: /pause /resume /stats /help             ║
 ╚══════════════════════════════════════════════════════╝
+
+BOOKMAKERS:
+  - Betfair Exchange (jamais flaggé)
+  - William Hill (licence DGOJ Espagne)
+  - Bwin (licence DGOJ Espagne)
+
+TIPS ANTI-FLAG:
+  - Varie légèrement tes mises (+/- 1-2€)
+  - Place les paris quelques heures avant le match
+  - Ne mise pas toujours le maximum
 """
 
 import os
@@ -33,15 +43,17 @@ LOG_FILE            = "arb_opportunities.json"
 # 🏟️  BOOKMAKERS
 # ─────────────────────────────────────────────────────
 
-BOOKS = ["betfair_ex_eu", "unibet_eu", "marathonbet"]
+BOOKS = ["betfair_ex_eu", "william_hill", "bwin"]
 
 BOOK_LABELS = {
     "betfair_ex_eu": "📗 BETFAIR ⭐",
-    "unibet_eu":     "📘 UNIBET ⭐",
-    "marathonbet":   "📙 MARATHONBET",
+    "william_hill":  "📘 WILLIAM HILL",
+    "bwin":          "📙 BWIN",
 }
 
-PRIORITY_BOOKS = ["betfair_ex_eu", "unibet_eu"]
+# Betfair = jamais flaggé, les autres à utiliser avec discrétion
+SAFE_BOOKS   = ["betfair_ex_eu"]
+RISKY_BOOKS  = ["william_hill", "bwin"]
 
 # ─────────────────────────────────────────────────────
 # 🏟️  SPORTS (6 ligues)
@@ -160,8 +172,10 @@ def check_telegram_commands():
                     "▶️ /resume — Reprend le scanner\n"
                     "📊 /stats — Rapport de session\n"
                     "❓ /help — Affiche ce message\n\n"
-                    "💡 <i>Astuce: mets en pause la nuit\n"
-                    "pour économiser tes crédits API!</i>"
+                    "💡 <b>Tips anti-flag:</b>\n"
+                    "• Varie tes mises de ±1-2€\n"
+                    "• Mise quelques heures avant le match\n"
+                    "• Pause la nuit pour économiser l'API"
                 )
     except Exception as e:
         log.error(f"Telegram getUpdates error: {e}")
@@ -171,18 +185,20 @@ def send_startup_message():
     mode = "📄 PAPER TRADING" if PAPER_TRADING else "💰 LIVE BETTING"
     sports_list = "\n".join(f"   {v}" for v in SPORTS.values())
     send_telegram(
-        f"🚀 <b>Arb Scanner v6 démarré</b>\n"
+        f"🚀 <b>Arb Scanner v7 démarré</b>\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
         f"Mode: <b>{mode}</b>\n"
-        f"Bookmakers: <b>Betfair + Unibet + Marathonbet</b>\n"
+        f"Bookmakers:\n"
+        f"   📗 Betfair (safe)\n"
+        f"   📘 William Hill\n"
+        f"   📙 Bwin\n"
         f"Type: <b>Pré-match uniquement</b>\n"
         f"Sports:\n{sports_list}\n"
         f"Min profit: <b>{MIN_PROFIT_PCT}%</b>\n"
         f"Bankroll: <b>${BANKROLL}</b>\n"
         f"Interval: <b>{POLL_INTERVAL // 60} min</b>\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
-        f"💬 /pause /resume /stats /help\n"
-        f"💡 <i>Pense à /pause la nuit!</i>"
+        f"💬 /pause /resume /stats /help"
     )
 
 
@@ -293,7 +309,7 @@ def find_arb_opportunities(game: dict, sport_label: str) -> list:
 
     # Pour chaque outcome → meilleure cote et son bookie
     best = {}
-    all_odds_by_outcome = {}  # Pour afficher toutes les cotes dans l'alerte
+    all_odds_by_outcome = {}
 
     for outcome in all_outcomes:
         all_odds_by_outcome[outcome] = {}
@@ -325,19 +341,21 @@ def find_arb_opportunities(game: dict, sport_label: str) -> list:
 
     # Mises optimales
     sides = []
+    risky_involved = []
+
     for team_name, info in best.items():
         prob = 1 / info["odd"]
         stake = round((BANKROLL * prob) / total_prob, 2)
+        if info["bookie"] in RISKY_BOOKS:
+            risky_involved.append(BOOK_LABELS.get(info["bookie"], info["bookie"]))
         sides.append({
             "team": team_name,
             "odd": info["odd"],
             "bookie": info["bookie"],
             "stake": stake,
             "all_odds": all_odds_by_outcome.get(team_name, {}),
-            "is_priority": info["bookie"] in PRIORITY_BOOKS,
+            "is_safe": info["bookie"] in SAFE_BOOKS,
         })
-
-    has_priority = any(s["is_priority"] for s in sides)
 
     return [{
         "sport": sport_label,
@@ -348,7 +366,7 @@ def find_arb_opportunities(game: dict, sport_label: str) -> list:
         "sides": sides,
         "profit_pct": round(profit_pct, 2),
         "profit": round(BANKROLL * (1 / total_prob - 1), 2),
-        "has_priority": has_priority,
+        "risky_involved": risky_involved,
         "detected_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
     }]
 
@@ -371,18 +389,18 @@ def format_alert(opp: dict) -> str:
 
     for side in opp["sides"]:
         label = BOOK_LABELS.get(side["bookie"], side["bookie"].upper())
-        # Autres cotes pour comparaison
         others = ", ".join(
-            f"{BOOK_LABELS.get(bk, bk).split()[1] if ' ' in BOOK_LABELS.get(bk, bk) else bk}: {odd}"
+            f"{BOOK_LABELS.get(bk, bk).split()[-1]}: {odd}"
             for bk, odd in side["all_odds"].items()
             if bk != side["bookie"]
         )
         msg += (
             f"{label}\n"
             f"   {side['team']} @ <b>{side['odd']}</b> ← meilleure\n"
-            f"   (autres: {others})\n"
-            f"   Mise: <b>${side['stake']}</b>\n\n"
         )
+        if others:
+            msg += f"   (autres: {others})\n"
+        msg += f"   Mise: <b>${side['stake']}</b>\n\n"
 
     msg += (
         f"━━━━━━━━━━━━━━━━━━━━\n"
@@ -390,7 +408,14 @@ def format_alert(opp: dict) -> str:
         f"   Sur bankroll de ${BANKROLL}\n"
         f"⏱ Détecté: {opp['detected_at']}\n"
     )
-    msg += "⚠️ <b>VÉRIFIE les cotes avant de miser!</b>" if not PAPER_TRADING else "📄 <i>Paper trade — aucun vrai pari placé</i>"
+
+    # Rappel anti-flag si bookmaker risqué impliqué
+    if opp["risky_involved"] and not PAPER_TRADING:
+        risky_str = ", ".join(opp["risky_involved"])
+        msg += f"\n⚠️ <b>Anti-flag:</b> varie ta mise de ±1-2€ sur {risky_str}"
+    elif PAPER_TRADING:
+        msg += "\n📄 <i>Paper trade — aucun vrai pari placé</i>"
+
     return msg
 
 
@@ -417,7 +442,7 @@ def log_opportunity(opp: dict):
 # ─────────────────────────────────────────────────────
 
 def run_scanner():
-    log.info("🚀 ARB SCANNER v6 STARTED")
+    log.info("🚀 ARB SCANNER v7 STARTED")
     send_startup_message()
 
     seen_opps = {}
@@ -442,8 +467,7 @@ def run_scanner():
                 for game in games:
                     all_opps.extend(find_arb_opportunities(game, sport_label))
 
-            # Trier: priorité aux bookmakers cibles, puis par profit
-            all_opps.sort(key=lambda x: (x["has_priority"], x["profit_pct"]), reverse=True)
+            all_opps.sort(key=lambda x: x["profit_pct"], reverse=True)
 
             if all_opps:
                 log.info(f"🎯 {len(all_opps)} opportunité(s)")
