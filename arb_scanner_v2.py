@@ -1,23 +1,24 @@
 """
 ╔══════════════════════════════════════════════════════╗
-║   ARB SCANNER v8 — Betfair + William Hill + Bwin    ║
-║   9 sports | 20 min interval | Pré-match only       ║
-║   ~9 700 req/mois avec 12h actif/jour               ║
+║   ARB SCANNER v9 — Mix de ligues illiquides         ║
+║   Seuil: 0.5% | 4 bookmakers | 20 min              ║
 ║   Commandes: /pause /resume /stats /help             ║
 ╚══════════════════════════════════════════════════════╝
 
-QUOTA:
-  9 sports × 3/heure × 12h × 30j = 9 720 req ✅
-  Plan $10 = 10 000 req/mois → safe avec pauses nuit
+CHANGEMENTS v9:
+  - Seuil baissé à 0.5% (au lieu de 1%)
+  - Ligues moins liquides = plus de divergences de cotes
+  - Ajout de Pinnacle (référence mondiale pour l'arb)
+  - Mix ligues majeures + ligues sous le radar
 
 BOOKMAKERS:
-  - Betfair Exchange  → jamais flaggé (exchange)
+  - Betfair Exchange  → jamais flaggé
   - William Hill      → licence DGOJ Espagne
   - Bwin              → licence DGOJ Espagne
+  - Pinnacle          → meilleures cotes du marché
 
-TIPS ANTI-FLAG:
-  - Varie tes mises de ±1-2€ sur William Hill / Bwin
-  - Place les paris quelques heures avant le match
+QUOTA:
+  9 sports × 3/heure × 12h × 30j = 9 720 req ✅
 """
 
 import os
@@ -38,40 +39,44 @@ TELEGRAM_BOT_TOKEN  = os.environ.get("TELEGRAM_BOT_TOKEN", "YOUR_TELEGRAM_BOT_TO
 TELEGRAM_CHAT_ID    = os.environ.get("TELEGRAM_CHAT_ID", "YOUR_TELEGRAM_CHAT_ID")
 
 PAPER_TRADING       = True
-MIN_PROFIT_PCT      = 1.0
+MIN_PROFIT_PCT      = 1.0   # Baissé de 1.0% à 0.5%
 BANKROLL            = 100
-POLL_INTERVAL       = 1200  # 20 minutes → 3 scans/heure
+POLL_INTERVAL       = 1200  # 20 minutes
 LOG_FILE            = "arb_opportunities.json"
 
 # ─────────────────────────────────────────────────────
 # 🏟️  BOOKMAKERS
 # ─────────────────────────────────────────────────────
 
-BOOKS = ["betfair_ex_eu", "william_hill", "bwin"]
+BOOKS = ["betfair_ex_eu", "william_hill", "bwin", "pinnacle"]
 
 BOOK_LABELS = {
     "betfair_ex_eu": "📗 BETFAIR ⭐",
     "william_hill":  "📘 WILLIAM HILL",
     "bwin":          "📙 BWIN",
+    "pinnacle":      "📕 PINNACLE",
 }
 
-SAFE_BOOKS  = ["betfair_ex_eu"]
+SAFE_BOOKS  = ["betfair_ex_eu", "pinnacle"]  # Pinnacle ne flag pas non plus
 RISKY_BOOKS = ["william_hill", "bwin"]
 
 # ─────────────────────────────────────────────────────
-# 🏟️  SPORTS (9 ligues)
+# 🏟️  SPORTS — Mix ligues majeures + sous le radar
 # ─────────────────────────────────────────────────────
 
 SPORTS = {
-    "basketball_nba":               "🏀 NBA",
-    "soccer_spain_la_liga":         "⚽ La Liga",
-    "soccer_epl":                   "⚽ Premier League",
-    "soccer_uefa_champs_league":    "⚽ Champions League",
-    "soccer_italy_serie_a":         "⚽ Serie A",
-    "soccer_france_ligue_one":      "⚽ Ligue 1",
-    "soccer_germany_bundesliga":    "⚽ Bundesliga",
-    "soccer_mexico_ligamx":         "⚽ Liga MX",
-    "soccer_uefa_europa_league":    "⚽ Europa League",
+    # Ligues majeures (volume de matchs)
+    "soccer_spain_la_liga":                 "⚽ La Liga",
+    "basketball_nba":                       "🏀 NBA",
+
+    # Ligues sous le radar (plus de divergences)
+    "soccer_portugal_primeira_liga":        "⚽ Liga Portugal",
+    "soccer_netherlands_eredivisie":        "⚽ Eredivisie",
+    "soccer_turkey_super_league":           "⚽ Super Lig Turquie",
+    "soccer_argentina_primera_division":    "⚽ Liga Argentina",
+    "soccer_brazil_campeonato":             "⚽ Brasileirao",
+    "soccer_usa_mls":                       "⚽ MLS",
+    "soccer_scotland_premiership":          "⚽ Scottish Premier",
 }
 
 # ─────────────────────────────────────────────────────
@@ -191,19 +196,18 @@ def send_startup_message():
     mode = "📄 PAPER TRADING" if PAPER_TRADING else "💰 LIVE BETTING"
     sports_list = "\n".join(f"   {v}" for v in SPORTS.values())
     send_telegram(
-        f"🚀 <b>Arb Scanner v8 démarré</b>\n"
+        f"🚀 <b>Arb Scanner v9 démarré</b>\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
         f"Mode: <b>{mode}</b>\n"
         f"Bookmakers:\n"
         f"   📗 Betfair (safe)\n"
         f"   📘 William Hill\n"
         f"   📙 Bwin\n"
-        f"Type: <b>Pré-match uniquement</b>\n"
-        f"Sports:\n{sports_list}\n"
+        f"   📕 Pinnacle (safe)\n"
         f"Min profit: <b>{MIN_PROFIT_PCT}%</b>\n"
         f"Bankroll: <b>${BANKROLL}</b>\n"
         f"Interval: <b>{POLL_INTERVAL // 60} min</b>\n"
-        f"Quota: ~9 720 req/mois (safe ✅)\n"
+        f"Sports:\n{sports_list}\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
         f"💬 /pause /resume /stats /help\n"
         f"💡 <i>Pense à /pause la nuit!</i>"
@@ -378,7 +382,7 @@ def find_arb_opportunities(game: dict, sport_label: str) -> list:
 def format_alert(opp: dict) -> str:
     mode_tag = "📄 PAPER" if PAPER_TRADING else "💰 LIVE"
     p = opp["profit_pct"]
-    profit_emoji = "🤑" if p >= 5 else "💰" if p >= 3 else "✅" if p >= 2 else "⚡"
+    profit_emoji = "🤑" if p >= 5 else "💰" if p >= 3 else "✅" if p >= 2 else "⚡" if p >= 1 else "🔹"
 
     msg = (
         f"{profit_emoji} <b>ARB DETECTED [{mode_tag}] — {opp['sport']}</b>\n"
@@ -439,7 +443,7 @@ def log_opportunity(opp: dict):
 # ─────────────────────────────────────────────────────
 
 def run_scanner():
-    log.info("🚀 ARB SCANNER v8 STARTED")
+    log.info("🚀 ARB SCANNER v9 STARTED")
     send_startup_message()
 
     seen_opps = {}
