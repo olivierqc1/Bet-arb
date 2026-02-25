@@ -1,19 +1,23 @@
 """
 ╔══════════════════════════════════════════════════════╗
-║   ARB SCANNER v7 — Betfair + William Hill + Bwin    ║
-║   6 sports | Pré-match uniquement                   ║
+║   ARB SCANNER v8 — Betfair + William Hill + Bwin    ║
+║   9 sports | 20 min interval | Pré-match only       ║
+║   ~9 700 req/mois avec 12h actif/jour               ║
 ║   Commandes: /pause /resume /stats /help             ║
 ╚══════════════════════════════════════════════════════╝
 
+QUOTA:
+  9 sports × 3/heure × 12h × 30j = 9 720 req ✅
+  Plan $10 = 10 000 req/mois → safe avec pauses nuit
+
 BOOKMAKERS:
-  - Betfair Exchange (jamais flaggé)
-  - William Hill (licence DGOJ Espagne)
-  - Bwin (licence DGOJ Espagne)
+  - Betfair Exchange  → jamais flaggé (exchange)
+  - William Hill      → licence DGOJ Espagne
+  - Bwin              → licence DGOJ Espagne
 
 TIPS ANTI-FLAG:
-  - Varie légèrement tes mises (+/- 1-2€)
+  - Varie tes mises de ±1-2€ sur William Hill / Bwin
   - Place les paris quelques heures avant le match
-  - Ne mise pas toujours le maximum
 """
 
 import os
@@ -36,7 +40,7 @@ TELEGRAM_CHAT_ID    = os.environ.get("TELEGRAM_CHAT_ID", "YOUR_TELEGRAM_CHAT_ID"
 PAPER_TRADING       = True
 MIN_PROFIT_PCT      = 1.0
 BANKROLL            = 100
-POLL_INTERVAL       = 600   # 10 min
+POLL_INTERVAL       = 1200  # 20 minutes → 3 scans/heure
 LOG_FILE            = "arb_opportunities.json"
 
 # ─────────────────────────────────────────────────────
@@ -51,12 +55,11 @@ BOOK_LABELS = {
     "bwin":          "📙 BWIN",
 }
 
-# Betfair = jamais flaggé, les autres à utiliser avec discrétion
-SAFE_BOOKS   = ["betfair_ex_eu"]
-RISKY_BOOKS  = ["william_hill", "bwin"]
+SAFE_BOOKS  = ["betfair_ex_eu"]
+RISKY_BOOKS = ["william_hill", "bwin"]
 
 # ─────────────────────────────────────────────────────
-# 🏟️  SPORTS (6 ligues)
+# 🏟️  SPORTS (9 ligues)
 # ─────────────────────────────────────────────────────
 
 SPORTS = {
@@ -66,6 +69,9 @@ SPORTS = {
     "soccer_uefa_champs_league":    "⚽ Champions League",
     "soccer_italy_serie_a":         "⚽ Serie A",
     "soccer_france_ligue_one":      "⚽ Ligue 1",
+    "soccer_germany_bundesliga":    "⚽ Bundesliga",
+    "soccer_mexico_ligamx":         "⚽ Liga MX",
+    "soccer_uefa_europa_league":    "⚽ Europa League",
 }
 
 # ─────────────────────────────────────────────────────
@@ -175,7 +181,7 @@ def check_telegram_commands():
                     "💡 <b>Tips anti-flag:</b>\n"
                     "• Varie tes mises de ±1-2€\n"
                     "• Mise quelques heures avant le match\n"
-                    "• Pause la nuit pour économiser l'API"
+                    "• /pause la nuit pour économiser l'API"
                 )
     except Exception as e:
         log.error(f"Telegram getUpdates error: {e}")
@@ -185,7 +191,7 @@ def send_startup_message():
     mode = "📄 PAPER TRADING" if PAPER_TRADING else "💰 LIVE BETTING"
     sports_list = "\n".join(f"   {v}" for v in SPORTS.values())
     send_telegram(
-        f"🚀 <b>Arb Scanner v7 démarré</b>\n"
+        f"🚀 <b>Arb Scanner v8 démarré</b>\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
         f"Mode: <b>{mode}</b>\n"
         f"Bookmakers:\n"
@@ -197,8 +203,10 @@ def send_startup_message():
         f"Min profit: <b>{MIN_PROFIT_PCT}%</b>\n"
         f"Bankroll: <b>${BANKROLL}</b>\n"
         f"Interval: <b>{POLL_INTERVAL // 60} min</b>\n"
+        f"Quota: ~9 720 req/mois (safe ✅)\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
-        f"💬 /pause /resume /stats /help"
+        f"💬 /pause /resume /stats /help\n"
+        f"💡 <i>Pense à /pause la nuit!</i>"
     )
 
 
@@ -259,11 +267,6 @@ def fetch_odds(sport_key: str) -> list:
 # ─────────────────────────────────────────────────────
 
 def find_arb_opportunities(game: dict, sport_label: str) -> list:
-    """
-    Pour chaque outcome, prend la MEILLEURE cote parmi tous les bookmakers.
-    Si sum(1/meilleure_cote) < 1.0 → vrai arb.
-    Pré-match uniquement.
-    """
     home = game.get("home_team", "Home")
     away = game.get("away_team", "Away")
     commence_raw = game.get("commence_time", "")
@@ -299,7 +302,6 @@ def find_arb_opportunities(game: dict, sport_label: str) -> list:
     if len(bookie_odds) < 2:
         return []
 
-    # Tous les outcomes disponibles
     all_outcomes = set()
     for odds in bookie_odds.values():
         all_outcomes.update(odds.keys())
@@ -330,7 +332,6 @@ def find_arb_opportunities(game: dict, sport_label: str) -> list:
     if len(best) < 2:
         return []
 
-    # Calcul arb
     total_prob = sum(1 / v["odd"] for v in best.values())
     if total_prob >= 1.0:
         return []
@@ -339,7 +340,6 @@ def find_arb_opportunities(game: dict, sport_label: str) -> list:
     if profit_pct < MIN_PROFIT_PCT:
         return []
 
-    # Mises optimales
     sides = []
     risky_involved = []
 
@@ -394,10 +394,8 @@ def format_alert(opp: dict) -> str:
             for bk, odd in side["all_odds"].items()
             if bk != side["bookie"]
         )
-        msg += (
-            f"{label}\n"
-            f"   {side['team']} @ <b>{side['odd']}</b> ← meilleure\n"
-        )
+        msg += f"{label}\n"
+        msg += f"   {side['team']} @ <b>{side['odd']}</b> ← meilleure\n"
         if others:
             msg += f"   (autres: {others})\n"
         msg += f"   Mise: <b>${side['stake']}</b>\n\n"
@@ -409,10 +407,9 @@ def format_alert(opp: dict) -> str:
         f"⏱ Détecté: {opp['detected_at']}\n"
     )
 
-    # Rappel anti-flag si bookmaker risqué impliqué
     if opp["risky_involved"] and not PAPER_TRADING:
         risky_str = ", ".join(opp["risky_involved"])
-        msg += f"\n⚠️ <b>Anti-flag:</b> varie ta mise de ±1-2€ sur {risky_str}"
+        msg += f"\n⚠️ <b>Anti-flag:</b> varie ta mise ±1-2€ sur {risky_str}"
     elif PAPER_TRADING:
         msg += "\n📄 <i>Paper trade — aucun vrai pari placé</i>"
 
@@ -442,7 +439,7 @@ def log_opportunity(opp: dict):
 # ─────────────────────────────────────────────────────
 
 def run_scanner():
-    log.info("🚀 ARB SCANNER v7 STARTED")
+    log.info("🚀 ARB SCANNER v8 STARTED")
     send_startup_message()
 
     seen_opps = {}
@@ -474,7 +471,7 @@ def run_scanner():
                 for opp in all_opps:
                     key = f"{opp['home']}-{opp['away']}-{opp['profit_pct']}"
                     now = time.time()
-                    if key in seen_opps and (now - seen_opps[key]) < 600:
+                    if key in seen_opps and (now - seen_opps[key]) < POLL_INTERVAL:
                         continue
                     seen_opps[key] = now
                     session_stats["opps_found"] += 1
@@ -491,7 +488,7 @@ def run_scanner():
                 send_stats_update()
                 last_report = time.time()
 
-            seen_opps = {k: v for k, v in seen_opps.items() if time.time() - v < 600}
+            seen_opps = {k: v for k, v in seen_opps.items() if time.time() - v < POLL_INTERVAL}
 
             elapsed = 0
             while elapsed < POLL_INTERVAL:
